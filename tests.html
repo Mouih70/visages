@@ -1,0 +1,100 @@
+<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Tests Visages</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="font-family:monospace;padding:12px"><pre id="out">Tests en cours…</pre>
+<script type="module">
+import * as N from './noyau.js';
+const out = [], ok = (c, m) => { if (!c) throw new Error('ÉCHEC : ' + m); out.push('ok  ' + m); };
+const afficher = t => (document.getElementById('out').textContent = t);
+try {
+  // ---------------------------------------------------------------- 1. logique pure
+  ok(Math.abs(N.cosinus([1, 0], [1, 0]) - 1) < 1e-9 && Math.abs(N.cosinus([1, 0], [0, 1])) < 1e-9, 'cosinus');
+  const ids = [{ id: 1, embs: [[1, 0, 0]] }, { id: 2, embs: [[0, 1, 0], [0.7, 0.7, 0]] }];
+  ok(N.meilleureIdentite([0.9, 0.1, 0], ids, 0.6).id === 1, 'plus proche voisin');
+  ok(N.meilleureIdentite([0, 0, 1], ids, 0.6).id === null, 'sous le seuil = inconnu');
+  const vu = {};
+  ok(N.nouveauPassage(vu, 1, 'Caméra 3', 0, 30) && !N.nouveauPassage(vu, 1, 'Caméra 3', 10000, 30), 'même présence = 1 passage');
+  ok(N.nouveauPassage(vu, 1, 'Caméra 4', 10000, 30) && N.nouveauPassage(vu, 1, 'Caméra 3', 60000, 30), 'autre caméra / plus tard = nouveau passage');
+  const b64 = s => btoa(unescape(encodeURIComponent(s))).replace(/\+/g, '-').replace(/\//g, '_');
+  const msg = { id: 'm1', internalDate: '1764150000000', payload: { mimeType: 'multipart/mixed', parts: [
+    { mimeType: 'text/plain', body: { data: b64('Alarm Event: Motion Detection\nAlarm Input Channel: 3\nAlarm Device Name: XVR') } },
+    { mimeType: 'image/jpeg', filename: 'snapshot.jpg', body: { attachmentId: 'att1' } }] } };
+  const a = N.analyserMessage(msg);
+  ok(a.camera === 'Caméra 3' && a.ts === 1764150000000 && a.images.length === 1 && a.images[0].attachmentId === 'att1', 'e-mail Dahua (texte « Channel: 3 »)');
+  ok(N.analyserMessage({ id: 'm2', internalDate: '1', payload: { mimeType: 'image/jpeg', filename: 'Ch12_20261126.jpg', body: { data: 'AA' } } }).camera === 'Caméra 12', 'canal lu dans le nom du fichier');
+  ok(N.analyserMessage({ id: 'm3', internalDate: '1', payload: { mimeType: 'text/plain', body: { data: b64('bonjour') } } }).images.length === 0, 'e-mail sans photo');
+  const J = 86400000, now = 100 * J;
+  const e = N.aEffacer([{ id: 1, nom: null, dernier: now - 8 * J }, { id: 2, nom: 'Karim', categorie: 'resident', dernier: now - 90 * J },
+    { id: 3, nom: 'Visiteur #3', categorie: 'visiteur', dernier: now - 31 * J }, { id: 4, nom: null, dernier: now - J }],
+    [{ id: 10, ts: now - 31 * J, identite: 2 }, { id: 11, ts: now - J, identite: 1 }, { id: 12, ts: now - J, identite: 2 }], now, N.REGLAGES);
+  ok(JSON.stringify(e.identites) === '[1,3]' && JSON.stringify(e.passages) === '[10,11]', 'ménage (inconnu 7 j, visiteur 30 j, résident gardé)');
+  ok(N.echapper('<img onerror=x>"') === '&lt;img onerror=x&gt;&quot;', 'échappement HTML');
+  const morceaux = N.decoupage(1920, 1080);
+  ok(morceaux.length === 8 && morceaux.every(([x, y, w, h]) => x + w <= 1920 && y + h <= 1080 && w === 720), 'découpage 1920×1080 en 8 morceaux de 720');
+  ok(N.decoupage(640, 480).length === 1, 'petite photo = 1 morceau');
+  ok(N.garderUniques([{ box: [100, 100, 80, 80], score: 0.9 }, { box: [104, 98, 80, 82], score: 0.95 }, { box: [600, 100, 80, 80], score: 0.8 }]).length === 2, 'même visage dans 2 morceaux = 1 seul');
+  const coupe = N.garderUniques([{ box: [359, 185, 361, 421], score: 1 }, { box: [197, 13, 767, 767], score: 0.99 }]);  // cas réel (biden.jpg)
+  ok(coupe.length === 1 && coupe[0].box[2] === 767, 'demi-visage coupé par un morceau = ignoré, visage entier gardé');
+  const db = await N.ouvrirBase('visages-test-' + Date.now());
+  const id = await N.ecrire(db, 'identites', { nom: 'Test', embs: [[1, 2]] });
+  ok((await N.lire(db, 'identites', id)).nom === 'Test' && (await N.tout(db, 'identites')).length === 1, 'stockage IndexedDB');
+  await N.effacer(db, 'identites', id);
+  ok((await N.tout(db, 'identites')).length === 0, 'effacement IndexedDB');
+  afficher(out.join('\n') + '\n… chargement des modèles de visage (≈10 Mo)…');
+
+  // ---------------------------------------------------------------- 2. vrais visages (Human)
+  const { default: Human } = await import(N.HUMAN_URL);
+  const human = new Human(N.CONFIG_HUMAN);
+  await human.load();  // pas de warmup() : il restait bloqué (vu en test) ; la 1re détection compile les calculs de toute façon
+  const charger = url => new Promise((res, rej) => { const i = new Image(); i.crossOrigin = 'anonymous'; i.onload = () => res(i); i.onerror = rej; i.src = url; });
+  const toile = (img, f = 1, lum = 1, miroir = false) => {
+    const c = document.createElement('canvas'); c.width = img.width * f; c.height = img.height * f;
+    const x = c.getContext('2d'); x.filter = `brightness(${lum})`;
+    if (miroir) { x.translate(c.width, 0); x.scale(-1, 1); }
+    x.drawImage(img, 0, 0, c.width, c.height); return c;
+  };
+  const visages = async src => (await human.detect(src)).face.filter(f => f.embedding && f.embedding.length);
+  const emb1 = async src => { const f = await visages(src); return f.length ? f.sort((p, q) => q.box[2] - p.box[2])[0].embedding : null; };
+  const lena = await charger('https://raw.githubusercontent.com/opencv/opencv/4.x/samples/data/lena.jpg');
+  const messi = await charger('https://raw.githubusercontent.com/opencv/opencv/4.x/samples/data/messi5.jpg');
+  const eL = await emb1(toile(lena)), eM = await emb1(toile(messi));
+  ok(eL && eM && eL.length >= 128, `visage détecté + empreinte (${eL && eL.length} valeurs)`);
+  const variantes = [['réduite 0.5', toile(lena, 0.5)], ['sombre', toile(lena, 1, 0.55)], ['miroir', toile(lena, 1, 1, true)], ['réduite 0.35 + claire', toile(lena, 0.35, 1.3)]];
+  const meme = [];
+  for (const [nom, c] of variantes) { const e2 = await emb1(c); meme.push([nom, e2 ? N.cosinus(eL, e2) : null]); }
+  // vraies photos publiques (dépôt face_recognition) : plusieurs photos par personne
+  const F = 'https://raw.githubusercontent.com/ageitgey/face_recognition/master/examples/', K = F + 'knn_examples/train/';
+  const photos = { obama: [F + 'obama.jpg', F + 'obama2.jpg', F + 'obama-240p.jpg', K + 'obama/obama2.jpg'], biden: [F + 'biden.jpg', K + 'biden/biden2.jpg'],
+    kit: [K + 'kit_harington/john1.jpeg', K + 'kit_harington/john2.jpeg'], rose: [K + 'rose_leslie/img1.jpg', K + 'rose_leslie/img2.jpg'],
+    alex: [K + 'alex_lacamoire/img1.jpg', F + 'alex-lacamoire.png'], lin: [F + 'lin-manuel-miranda.png'] };
+  const vrais = [{ p: 'lena', e: eL }, { p: 'messi', e: eM }];
+  for (const [p, urls] of Object.entries(photos)) for (const u of urls) { const e2 = await emb1(await charger(u)); if (e2) vrais.push({ p, e: e2 }); }
+  const intra = [], inter = [];
+  for (let i = 0; i < vrais.length; i++) for (let j = i + 1; j < vrais.length; j++) (vrais[i].p === vrais[j].p ? intra : inter).push(N.cosinus(vrais[i].e, vrais[j].e));
+  const stats = v => { const s = [...v].sort((p, q) => p - q); return v.length ? `min ${s[0].toFixed(2)} · médiane ${s[s.length >> 1].toFixed(2)} · max ${s[s.length - 1].toFixed(2)} (${v.length})` : 'aucun'; };
+  const pc = (v, f) => v.length ? Math.round(100 * v.filter(f).length / v.length) : 0;
+  out.push('', 'CALIBRAGE (cosinus) :',
+    '  Lena vs ses variantes : ' + meme.map(([n, s]) => `${n} ${s === null ? 'non détectée' : s.toFixed(2)}`).join(' | '),
+    '  Lena vs Messi (2 vraies personnes) : ' + N.cosinus(eL, eM).toFixed(2),
+    `  vraies photos (${vrais.length}) — même personne : ` + stats(intra),
+    '  vraies photos — personnes différentes : ' + stats(inter),
+    `  seuil ${N.REGLAGES.seuil} : même personne reconnue ${pc(intra, s => s >= N.REGLAGES.seuil)} % · personnes différentes confondues ${pc(inter, s => s >= N.REGLAGES.seuil)} %`);
+  window.calibrage = { meme, lenaMessi: N.cosinus(eL, eM), intra, inter };
+  // photo de caméra simulée : visage de 100 px dans 1920×1080 (l'image entière seule ne le voit pas)
+  const scene = document.createElement('canvas'); scene.width = 1920; scene.height = 1080;
+  const sx = scene.getContext('2d'); sx.fillStyle = '#6b6f73'; sx.fillRect(0, 0, 1920, 1080); sx.drawImage(lena, 1250, 600, 512 * 100 / 268, 512 * 100 / 268);
+  const detecter = async c => (await human.detect(c)).face;
+  const vus = await N.trouverVisages(detecter, scene);
+  out.push('  photo caméra 1920×1080, visage 100 px : ' + (vus.length ? `${vus.length} visage(s), ressemblance ${N.cosinus(eL, vus[0].embedding).toFixed(2)}` : 'rien'));
+  ok(vus.length === 1 && N.cosinus(eL, vus[0].embedding) >= N.REGLAGES.seuil, 'petit visage dans une photo de caméra : trouvé une seule fois et reconnu');
+  ok(meme.slice(0, 3).every(([, s]) => s !== null && s >= N.REGLAGES.seuil), 'Lena reconnue (réduite, sombre, miroir)');
+  ok(N.cosinus(eL, eM) < N.REGLAGES.seuil, 'Lena et Messi : pas confondus');
+  ok(vrais.length === 15, 'les 15 vraies photos ont un visage détecté');
+  ok(pc(inter, s => s >= N.REGLAGES.seuil) === 0, `seuil ${N.REGLAGES.seuil} : aucun étranger confondu (vraies photos)`);
+  ok(pc(intra, s => s >= N.REGLAGES.seuil) >= 80, `seuil ${N.REGLAGES.seuil} : même personne reconnue ≥ 80 % (vraies photos)`);
+  afficher(out.join('\n') + '\n\nOK : toutes les vérifications passent');
+  window.resultatTests = 'OK';
+} catch (err) {
+  afficher(out.join('\n') + '\n\n' + err.message + '\n' + (err.stack || ''));
+  window.resultatTests = err.message;
+}
+</script></body></html>
